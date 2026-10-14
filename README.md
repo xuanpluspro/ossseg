@@ -114,3 +114,63 @@ python -m unittest discover -s tests -v
 ~~~
 
 包含默认256通道模型512前向/反向/重载、辅助分支梯度、标签映射、划分泄漏、指标和合成VOC的训练/续训/测试/预测检查。CPU工作流不会下载模型权重、访问用户数据或使用GPU。未在真实植物数据上训练，未验证真实精度及CUDA/AMP表现。原论文的多光谱检测成绩不能作为本改造版的分割成绩。
+
+## 完整训练日志与最终结果（2026-10）
+
+此次仅完善工程，**OSSSeg原有CFB/SSAF/FEM模型结构与损失不变**。
+参考 xuanpluspro/vegann-seg-benchmark 增加tqdm训练/验证/测试进度条，
+显示batch完成比例、时间/预计剩余时间，训练和验证显示累计平均loss。
+每轮打印loss、mIoU、Dice、最佳前景IoU及耗时，并导出history.csv。
+
+项目根目录新增data/，可分别放data/RiceSeg/VOC2012、data/VegAnn/VOC2012等。
+数据不会提交Git；--data-path指向选定VOC2012总目录。当前仍要求
+JPEGImages、SegmentationClass、ImageSets/Segmentation/{train,val,test}.txt，
+图像/掩膜512×512，磁盘标签0背景/255植物（索引色读取原索引）。
+不会自动混合数据、生成划分或改变尺寸；各划分独立。test可选。
+
+训练结束自动加载best.pth（按验证集前景IoU选择），重新评估val和已登记test：
+
+| 文件 | 内容 |
+|---|---|
+| metrics.json | 最佳epoch、val/test所有精度及benchmark汇总 |
+| results.csv | 验证/测试各一行，Excel可打开；精度为0~1 |
+| benchmark.json | Params、部分/完整GFLOPs、FPS、平均/中位数/P95延迟及设备信息 |
+| history.json / history.csv | 每轮损失、精度、学习率、时间 |
+| loss_curve.png / metrics_curve.png | 损失与指标曲线 |
+| best.pth / last.pth | 最佳权重 / 完整续训checkpoint |
+
+精度包括前景/背景IoU、mIoU、Dice(F1)、Precision、Recall、Specificity、
+PixAcc、mAcc、FWIoU、Boundary F1、HD95、ASSD及混淆矩阵。
+区域指标按整个数据集累计像素；Boundary F1/HD95/ASSD按图像取平均。
+距离单位为512评估分辨率下的**像素**，Boundary F1容差固定2像素，非毫米。
+双方无前景时距离=0、Boundary F1=1；仅一方无前景时距离=图像对角线、F1=0，
+与参考仓库口径一致；大量空图会影响这些均值。HD95/ASSD越低越好。
+
+测速口径：PyTorch eager FP32、TF32关闭、batch=1、512×512，预热50次、
+测量200次CUDA event，仅模型前向，不含读图/传输/预处理/后处理。
+fvcore一次乘加计一次；不支持算子会注明，counted_gflops是部分计数，
+gflops仅在无遗漏时填写。CPU不输出GPU FPS。性能失败仍保留精度结果。
+--no-benchmark可跳过测速，仍输出最终精度；无test则明确注明而不冒充测试结果。
+
+更新并安装依赖：
+```bash
+git pull && pip install -r requirements.txt
+```
+
+训练示例（指定已有本地torchvision ResNet-50预训练权重）：
+```bash
+python train_medical.py --data-path data/RiceSeg/VOC2012 --backbone-weights model/weights/resnet50.pth --epochs 30 --batch-size 32 --workers 4 --device cuda --amp --output run/train/riceseg_pretrained
+```
+
+训练已完成的模型可补生成结果，无需重训：
+```bash
+python summarize.py --data-path data/RiceSeg/VOC2012 --weights run/train/riceseg_pretrained/best.pth --device cuda --batch-size 32 --workers 4
+```
+
+或者仅测速：
+```bash
+python benchmark.py --weights run/train/riceseg_pretrained/best.pth --device cuda
+```
+
+独立评估依然可用val.py；原模型checkpoint结构兼容，训练数据/超参数不改变时可续训。
+32GB最大可用batch尚未实测，batch=32显存不足时降低。边界距离在CPU计算，会增加验证时间。

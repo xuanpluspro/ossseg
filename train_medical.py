@@ -1,6 +1,8 @@
 """Train OSSSeg on 512px VOC-layout binary plant masks; select by validation plant IoU."""
 import argparse
 import json
+import csv
+from time import perf_counter
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
@@ -33,6 +35,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=11)
     p.add_argument("--device", default="auto")
     p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--benchmark", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--benchmark-warmup", type=int, default=50)
+    p.add_argument("--benchmark-iterations", type=int, default=200)
     return p.parse_args()
 
 
@@ -41,6 +46,8 @@ def train(args):
         raise ValueError("Require 1 foreground class, positive epochs/batch-size, nonnegative workers")
     if args.lr <= 0 or args.weight_decay < 0:
         raise ValueError("Invalid optimizer settings")
+    if getattr(args, "benchmark_warmup", 50) < 0 or getattr(args, "benchmark_iterations", 200) < 1:
+        raise ValueError("Invalid benchmark repetitions")
     seed_everything(args.seed)
     device = resolve_device(args.device)
     root = voc_root(args.data_path)
@@ -95,14 +102,17 @@ def train(args):
     (output / "splits.json").write_text(json.dumps(splits, indent=2), encoding="utf-8")
     print(f"device={device}; train={len(train_loader.dataset)} val={len(val_loader.dataset)}; params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     for epoch in range(start, args.epochs):
-        loss = train_one_epoch(model, optimizer, train_loader, device, criterion, scaler)
-        metrics = evaluate(model, val_loader, device, criterion)
+        begin = perf_counter()
+        loss = train_one_epoch(model, optimizer, train_loader, device, criterion, scaler,
+                               desc=f"Epoch {epoch+1}/{args.epochs} Train")
+        metrics = evaluate(model, val_loader, device, criterion,
+                           desc=f"Epoch {epoch+1}/{args.epochs} Val")
         score = metrics["Foreground IoU"]
         if score is None:
             raise ValueError("Undefined validation plant IoU; no plant pixels in labels or predictions")
         improved = score > best
         best = max(best, score)
-        history.append(dict(epoch=epoch + 1, train_loss=loss,
+        history.append(dict(epoch=epoch + 1, train_loss=loss, seconds=perf_counter()-begin,
                             lr=optimizer.param_groups[0]["lr"], **metrics))
         scheduler.step()
         checkpoint = dict(
@@ -115,8 +125,23 @@ def train(args):
             save_checkpoint(checkpoint, output / "best.pth")
         save_checkpoint(checkpoint, output / "last.pth")
         (output / "history.json").write_text(json.dumps(history, indent=2, allow_nan=False), encoding="utf-8")
-        print(json.dumps(history[-1], allow_nan=False), flush=True)
+        with (output / "history.csv").open("w", newline="", encoding="utf-8-sig") as stream:
+            fields = list(dict.fromkeys(k for h in history for k, v in h.items() if not isinstance(v, (list, dict))))
+            writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(history)
+        print(f"Epoch {epoch+1}/{args.epochs} | loss={loss:.4f} | val mIoU={metrics['Mean IoU']:.4f} "
+              f"| Dice={metrics['Dice']:.4f} | best foreground IoU={best:.4f} "
+              f"| time={history[-1]['seconds']:.1f}s", flush=True)
     if history:
+        from utils.results import export_final_results
+        best_checkpoint = read_checkpoint(output / "best.pth")
+        model.load_state_dict(best_checkpoint["model"], strict=True)
+        export_final_results(model, best_checkpoint, output / "best.pth", root, output,
+                             device, args.batch_size, args.workers,
+                             getattr(args, "benchmark", True),
+                             getattr(args, "benchmark_warmup", 50),
+                             getattr(args, "benchmark_iterations", 200))
         from utils.plot_results import plot_training_curves
         plot_training_curves([h["train_loss"] for h in history],
                              [h["Loss"] for h in history], history, str(output))

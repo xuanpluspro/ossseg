@@ -39,6 +39,14 @@ class Pipeline(unittest.TestCase):
             # Plotting is exercised separately by normal training; keep this test fast.
             with patch("utils.plot_results.plot_training_curves"):
                 train_medical.train(args)
+            final = json.loads((Path(args.output)/"metrics.json").read_text())
+            self.assertIn("val", final)
+            self.assertIn("test", final)
+            for metric in ("HD95", "ASSD", "Boundary F1"):
+                self.assertIn(metric, final["test"])
+            self.assertEqual(final["best_epoch"], read_checkpoint(Path(args.output)/"best.pth")["epoch"]+1)
+            self.assertEqual(len((Path(args.output)/"results.csv").read_text(encoding="utf-8-sig").splitlines()), 3)
+            self.assertEqual(len((Path(args.output)/"history.csv").read_text(encoding="utf-8-sig").splitlines()), 3)
             reference = read_checkpoint(Path(args.output)/"last.pth")
             args.output = str(Path(d)/"resumed")
             original_save = train_medical.save_checkpoint
@@ -72,6 +80,13 @@ class Pipeline(unittest.TestCase):
             probability = np.load(destination/"test_sample_prob.npy")
             self.assertTrue(np.isfinite(probability).all())
             self.assertTrue(((probability >= 0) & (probability <= 1)).all())
+            import summarize
+            with patch("sys.argv", ["summarize.py", "--data-path", str(root), "--weights", checkpoint,
+                                    "--device", "cpu", "--no-benchmark", "--output", str(Path(d)/"summary")]):
+                summarize.main()
+            report = json.loads((Path(d)/"summary/metrics.json").read_text())
+            self.assertEqual(report["test"]["Foreground IoU"], final["test"]["Foreground IoU"])
+
 
 
 if __name__ == "__main__":
