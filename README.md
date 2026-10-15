@@ -1,4 +1,4 @@
-# OSSSeg：RGB 植物二分类语义分割
+# OSSSeg：RGB 植物语义分割
 
 基于 [MODA/OSSDet](https://github.com/shuaihao-han/MODA) 的公开特征模块，替换本仓库原 ResNet50-U-Net。网络、模块及损失均在 model/，不依赖 MMRotate、MMDetection、MMCV。这是 OSSDet 衍生的 RGB 分割模型，不是原论文的八波段旋转框检测模型，原论文 mAP 不适用于它。
 
@@ -38,7 +38,7 @@ CPU测试工作流使用Python3.11、torch2.5.1、torchvision0.20.1；具体运�
 
 每行一个同名主干，不带扩展名。图片与掩膜必须都是512×512；程序不悄悄改变尺寸。--data-path接受VOCdevkit或VOC2012路径。不会自行划分；trainval.txt不能当作独立验证集。如果目前只有trainval，先依据真实划分整理为互不重叠的train/val/test。
 
-**磁盘掩膜采用0背景、255植物；读取后转为0背景、1植物。**0/255更易查看，0/1适合交叉熵训练，两者不影响模型精度，只要映射一致。255在这里是植物，不是标准多类VOC中的void。此工程采用VOC目录布局，不采用其21类标签语义。0/1磁盘掩膜需先明确转换，不会自动猜测；彩色可视化也不能作为标签输入。
+**背景为0，支持0/255或0/1二分类、0..K-1多分类。** 使用下方“标签编码与多分类”中的参数明确类别数与编码；这是VOC目录布局，不自动采用VOC的21类或void语义。
 
 ~~~bash
 python check_data.py --data-path VOCdevkit
@@ -72,7 +72,7 @@ python train_medical.py --data-path VOCdevkit --from-scratch --batch-size 2 --ep
 python train_medical.py --data-path VOCdevkit --resume run/train/ossseg/last.pth --batch-size 2 --epochs 100 --output run/train/ossseg
 ~~~
 
-恢复保留原总epochs及其他训练/模型参数，恢复优化器、调度器、AMP与随机状态。不要把--epochs改为剩余轮数。--output须为原运行目录；新实验不能覆盖非空目录。支持--amp/--no-amp，CPU自动禁用AMP。--num-classes沿用旧命令的“前景类别数”含义，固定为1，模型输出2通道。
+恢复保留原总epochs及其他训练/模型参数，恢复优化器、调度器、AMP与随机状态。不要把--epochs改为剩余轮数。--output须为原运行目录；新实验不能覆盖非空目录。支持--amp/--no-amp，CPU自动禁用AMP。--num-classes沿用旧命令的“前景类别数”含义，二分类为1（输出2通道），五分类为4（输出5通道）。
 
 输出：
 - best.pth：验证集**Foreground IoU**最高的checkpoint。
@@ -117,7 +117,7 @@ python -m unittest discover -s tests -v
 
 ## 完整训练日志与最终结果（2026-10）
 
-此次仅完善工程，**OSSSeg原有CFB/SSAF/FEM模型结构与损失不变**。
+工程保留OSSSeg原有CFB/SSAF/FEM核心模块；多分类适配输出头、损失和评估流程。
 参考 xuanpluspro/vegann-seg-benchmark 增加tqdm训练/验证/测试进度条，
 显示batch完成比例、时间/预计剩余时间，训练和验证显示累计平均loss。
 每轮打印loss、mIoU、Dice、最佳前景IoU及耗时，并导出history.csv。
@@ -125,7 +125,7 @@ python -m unittest discover -s tests -v
 项目根目录新增data/，可分别放data/RiceSeg/VOC2012、data/VegAnn/VOC2012等。
 数据不会提交Git；--data-path指向选定VOC2012总目录。当前仍要求
 JPEGImages、SegmentationClass、ImageSets/Segmentation/{train,val,test}.txt，
-图像/掩膜512×512，磁盘标签0背景/255植物（索引色读取原索引）。
+图像/掩膜512×512，磁盘标签支持0/255、0/1或多分类索引（索引色读取原索引）。
 不会自动混合数据、生成划分或改变尺寸；各划分独立。test可选。
 
 训练结束自动加载best.pth（按验证集前景IoU选择），重新评估val和已登记test：
@@ -174,3 +174,26 @@ python benchmark.py --weights run/train/riceseg_pretrained/best.pth --device cud
 
 独立评估依然可用val.py；原模型checkpoint结构兼容，训练数据/超参数不改变时可续训。
 32GB最大可用batch尚未实测，batch=32显存不足时降低。边界距离在CPU计算，会增加验证时间。
+
+
+### 标签编码与多分类
+
+训练和 `check_data.py` 支持 `--mask-encoding auto|binary255|index`：
+
+| 原始掩码像素值 | 参数 | 模型输出通道 |
+|---|---|---|
+| 0、255（二分类） | `--num-classes 1 --mask-encoding binary255` | 2 |
+| 0、1（二分类） | `--num-classes 1 --mask-encoding index` | 2 |
+| 0、1、2、3、4（五分类） | `--num-classes 4 --mask-encoding index` | 5 |
+
+`--num-classes` 延续原接口，表示**不含背景的类别数**。默认 `auto` 在二分类时接受 0/1 或 0/255；多分类保留类别编号，越界报错，不将所有非零值合并。背景始终为0；不支持把255作为忽略标签。P模式PNG按调色板索引读取，彩色RGB标签需先转换为类别索引。图像和掩码仍要求512×512。
+
+多分类主分支使用K通道交叉熵和前景类别Dice，辅助分支学习所有非背景类别的并集；最佳模型按mIoU选取（二分类保持前景IoU）。`metrics.json`包含混淆矩阵、逐类指标，`class_metrics.csv`保存逐类结果；Dice/Precision/Recall取前景类别宏平均，未定义项不参与平均。Foreground IoU、HD95、ASSD、Boundary F1在多分类时衡量前景并集，不能衡量前景类别之间的混淆，应结合逐类IoU和mIoU阅读。
+
+预测多分类输出PNG像素为0..K-1，概率文件为K×H×W；二分类保持默认0/255和H×W概率，可加`--mask-output-encoding index`导出0/1。标签编码和类别数随检查点保存，验证和汇总自动复用。旧二分类检查点仍可评估；恢复旧检查点训练请显式指定`--mask-encoding binary255`。
+
+当前0/1数据集训练示例（输出目录须为空）：
+
+```bash
+python train_medical.py --data-path data/VOC201201 --mask-encoding index --num-classes 1 --backbone-weights pretrained/resnet50.pth --batch-size 32 --epochs 30 --output run/train/vegann01_pretrained_bs32_ep30
+```

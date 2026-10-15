@@ -32,13 +32,15 @@ def train_one_epoch(model, optimizer, loader, device, criterion, scaler, desc="T
 @torch.inference_mode()
 def evaluate(model, loader, device, criterion=None, desc="Validation"):
     model.eval()
-    metrics = SegmentationMetrics()
+    metrics = None
     total, count = 0., 0
     progress = tqdm(loader, desc=desc, dynamic_ncols=True, mininterval=0.5)
     for images, targets, _ in progress:
         images, targets = images.to(device), targets.to(device)
         output = model(images, return_aux=True) if criterion is not None else model(images)
         logits = output["logits"] if isinstance(output, dict) else output
+        if metrics is None:
+            metrics = SegmentationMetrics(logits.shape[1])
         metrics.update(logits, targets)
         if criterion is not None:
             total += criterion(output, targets).item() * images.shape[0]

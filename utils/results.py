@@ -29,6 +29,14 @@ def write_results(result, output):
             row.update({k: v for k, v in (result.get('benchmark') or {}).items() if k in fields})
             writer.writerow(row)
 
+    with (output / 'class_metrics.csv').open('w', newline='', encoding='utf-8-sig') as stream:
+        fields = ['split', 'class_id', 'IoU', 'Accuracy', 'Dice', 'Precision', 'Recall', 'pixels']
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for split in ('val', 'test'):
+            for row in result.get(split, {}).get('per_class', []):
+                writer.writerow(dict(split=split, **row))
+
 
 def export_final_results(model, checkpoint, checkpoint_path, root, output, device,
                          batch_size=2, workers=0, benchmark=True, warmup=50, iterations=200):
@@ -37,15 +45,15 @@ def export_final_results(model, checkpoint, checkpoint_path, root, output, devic
         raise ValueError('Final evaluation requires the same recorded train/val/test IDs')
     parameters = sum(p.numel() for p in model.parameters())
     result = dict(checkpoint=str(checkpoint_path), best_epoch=checkpoint['epoch'] + 1,
-                  selection_metric='validation Foreground IoU',
+                  selection_metric=('validation Foreground IoU' if checkpoint['model_config'].get('num_classes', 2) == 2 else 'validation Mean IoU'),
                   parameters=parameters, params_m=parameters / 1e6,
-                  model_config=checkpoint['model_config'], metric_scale='0-1',
+                  model_config=checkpoint['model_config'], data_config=checkpoint.get('data_config', {}), metric_scale='0-1',
                   test_status='evaluated' if 'test' in splits else 'not provided at training time',
                   benchmark=None)
     for split in ('val', 'test'):
         if split not in splits: continue
         print(f'Final {split} evaluation using checkpoint epoch {result["best_epoch"]}...', flush=True)
-        loader = DataLoader(PlantVOCDataset(root, split, augmentation=False),
+        loader = DataLoader(PlantVOCDataset(root, split, augmentation=False, **checkpoint.get("data_config", {})),
                             batch_size=batch_size, num_workers=workers, shuffle=False,
                             pin_memory=device.type == 'cuda')
         result[split] = evaluate(model, loader, device, desc=f'Final {split}')
